@@ -1,4 +1,4 @@
-// ZoomFly Control — app.js — Full Feature Build
+// ZoomFly Control — app.js — Full Feature Build + Email Notifications
 
 // ── CONFIG ────────────────────────────────────────────────────────
 const CRUISE_MPH        = 18;
@@ -137,7 +137,6 @@ function calculateRoute() {
     originLatLng = leg.start_location;
     destLatLng   = leg.end_location;
 
-    // Road route — gray subtle
     directionsRenderer.setDirections(result);
     if (roadPolyline) roadPolyline.setMap(null);
     roadPolyline = new google.maps.Polyline({
@@ -145,10 +144,8 @@ function calculateRoute() {
       geodesic:true, strokeColor:'#888888', strokeOpacity:0.3, strokeWeight:2, map, zIndex:3,
     });
 
-    // Aerial direct line — green dashed
     drawAerialLine();
 
-    // Origin / destination markers
     if (window._oMk) window._oMk.setMap(null);
     if (window._dMk) window._dMk.setMap(null);
     const dark = document.documentElement.getAttribute('data-theme')==='dark';
@@ -164,7 +161,6 @@ function calculateRoute() {
             fillColor:'#1D9E75', fillOpacity:1, strokeColor:'#fff', strokeWeight:2.5},
     });
 
-    // Calculations
     const aerialMi  = haversine(leg.start_location.lat(),leg.start_location.lng(),leg.end_location.lat(),leg.end_location.lng());
     const flightMin = aerialMi / CRUISE_MPH * 60;
     const mAhUsed   = CRUISE_AMPS * (flightMin/60) * 1000;
@@ -180,7 +176,7 @@ function calculateRoute() {
     const edEl = document.getElementById('est-dist');
     if (edEl) edEl.innerHTML = aerialMi.toFixed(2)+' <small>mi aerial</small>';
     set('bd-aerial', aerialMi.toFixed(2)+' mi');
-    set('bd-road',   leg.distance?.text||'—'+' road');
+    set('bd-road',   leg.distance?.text||'—');
     set('bd-ftime',  Math.round(flightMin)+' min');
     set('bd-batt',   '~'+battPct+'% ('+Math.round(mAhUsed)+' mAh)');
     set('bd-endurance', USABLE_ENDURANCE+' min usable ('+BATT_MIN_PCT+'% reserve)');
@@ -268,7 +264,6 @@ function startEnduranceCountdown() {
   if (wrap) wrap.style.display = 'block';
 
   enduranceTimer = setInterval(() => {
-    // If real battery data available use it
     if (lastTelemetry.battery_pct > 0) {
       const rem = Math.max(0, lastTelemetry.battery_pct - BATT_MIN_PCT);
       enduranceSecs = Math.round((rem/(100-BATT_MIN_PCT))*USABLE_ENDURANCE*60);
@@ -317,6 +312,23 @@ async function triggerRTL() {
   document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));
 }
 
+// ── EMAIL NOTIFICATION ────────────────────────────────────────────
+async function sendNotification(email, name, ticketId, status, origin, dest, elapsed='') {
+  if (!email) return;
+  try {
+    const r = await fetch('/api/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, name, ticket_id: ticketId, status, origin, destination: dest, elapsed }),
+    });
+    const d = await r.json();
+    if (d.ok) showToast('Email sent to ' + email, 'ok');
+    else      showToast('Email failed: ' + d.msg, 'error');
+  } catch(e) {
+    console.warn('Notify failed:', e.message);
+  }
+}
+
 // ── SUPABASE ──────────────────────────────────────────────────────
 const SB_URL  = 'YOUR_SUPABASE_URL';
 const SB_ANON = 'YOUR_SUPABASE_ANON_KEY';
@@ -342,6 +354,9 @@ async function createTicket() {
   const type    = document.getElementById('tf-type').value;
   const origin  = document.getElementById('input-origin').value.trim();
   const dest    = document.getElementById('input-dest').value.trim();
+  // ── Email field (new) ──
+  const emailEl = document.getElementById('tf-email');
+  const email   = emailEl ? emailEl.value.trim() : '';
 
   if (!mailNum||!first||!last||!by||!origin||!dest) {
     showToast('Please fill in all fields including addresses.','error'); return;
@@ -352,20 +367,41 @@ async function createTicket() {
   }
 
   const ticket = {
-    ticket_id:generateTicketId(), mail_number:mailNum, package_type:type,
-    quantity:ticketQty, recipient_first:first, recipient_last:last,
-    delivered_by:by, origin, destination:dest, status:'pending',
-    created_at:new Date().toISOString(), started_at:null, completed_at:null,
+    ticket_id:       generateTicketId(),
+    mail_number:     mailNum,
+    package_type:    type,
+    quantity:        ticketQty,
+    recipient_first: first,
+    recipient_last:  last,
+    delivered_by:    by,
+    origin,
+    destination:     dest,
+    status:          'pending',
+    created_at:      new Date().toISOString(),
+    started_at:      null,
+    completed_at:    null,
+    recipient_email: email || null,   // store email in DB
   };
 
   if (sbClient) {
     const {error} = await sbClient.from('deliveries').insert(ticket);
     if (error) { showToast('DB error: '+error.message,'error'); return; }
-  } else { ticket.id=Date.now(); deliveries.unshift(ticket); }
+  } else {
+    ticket.id = Date.now();
+    deliveries.unshift(ticket);
+  }
 
-  ['tf-mail','tf-first','tf-last','tf-by'].forEach(id=>document.getElementById(id).value='');
-  ticketQty=1; set('qty-display','1'); updatePayloadWarning();
-  loadQueue(); showToast('Ticket '+ticket.ticket_id+' created','ok');
+  // Clear form
+  ['tf-mail','tf-first','tf-last','tf-by'].forEach(id => document.getElementById(id).value = '');
+  if (emailEl) emailEl.value = '';
+  ticketQty = 1; set('qty-display','1'); updatePayloadWarning();
+  loadQueue();
+  showToast('Ticket '+ticket.ticket_id+' created','ok');
+
+  // Send dispatch notification email if provided
+  if (email) {
+    await sendNotification(email, first, ticket.ticket_id, 'dispatched', origin, dest);
+  }
 }
 
 async function loadQueue() {
@@ -382,7 +418,7 @@ async function loadQueue() {
 
   const inProgress = rows.find(r=>r.status==='in_progress');
   activeTicketId   = inProgress?.id||null;
-  const listEl = document.getElementById('queue-list');
+  const listEl  = document.getElementById('queue-list');
   const countEl = document.getElementById('queue-count');
   if (countEl) countEl.textContent = rows.length?`(${rows.length})`:'';
 
@@ -405,18 +441,24 @@ async function loadQueue() {
       const s=Math.round((new Date(r.completed_at)-new Date(r.started_at))/1000);
       elapsed=`<div class="qi-elapsed">Delivered in ${Math.floor(s/60)}m ${s%60}s</div>`;
     }
+    // Show email indicator if recipient has email
+    const emailBadge = r.recipient_email
+      ? `<div style="font-size:9px;color:var(--green-text);margin-top:2px">✉ ${r.recipient_email}</div>`
+      : '';
+
     div.innerHTML=`
       <div>
         <div class="qi-ticket">${r.ticket_id}</div>
         <div class="qi-recipient">${r.recipient_first} ${r.recipient_last}</div>
         <div class="qi-meta">${r.quantity}× letter · ~${weightG}g · #${r.mail_number} · by ${r.delivered_by}</div>
         <div class="qi-meta" style="margin-top:2px;color:var(--text3);font-size:10px">${destShort}</div>
+        ${emailBadge}
         ${elapsed}
       </div>
       <div class="qi-right">
         <span class="status-badge ${r.status}">${labels[r.status]||r.status}</span>
         <span class="qi-date">${created}</span>
-        ${canStart?`<button class="qi-start-btn" data-id="${r.id}" data-origin="${encodeURIComponent(r.origin)}" data-dest="${encodeURIComponent(r.destination)}" data-name="${encodeURIComponent(r.recipient_first+' '+r.recipient_last)}">Start</button>`:''}
+        ${canStart?`<button class="qi-start-btn" data-id="${r.id}" data-origin="${encodeURIComponent(r.origin)}" data-dest="${encodeURIComponent(r.destination)}" data-name="${encodeURIComponent(r.recipient_first+' '+r.recipient_last)}" data-email="${encodeURIComponent(r.recipient_email||'')}">Start</button>`:''}
         ${r.status==='in_progress'?'<span class="qi-active-badge">● Active</span>':''}
       </div>`;
     listEl.appendChild(div);
@@ -427,7 +469,8 @@ async function loadQueue() {
       btn.dataset.id,
       decodeURIComponent(btn.dataset.origin),
       decodeURIComponent(btn.dataset.dest),
-      decodeURIComponent(btn.dataset.name)
+      decodeURIComponent(btn.dataset.name),
+      decodeURIComponent(btn.dataset.email||'')
     ));
   });
   updateStartButtonState();
@@ -439,7 +482,7 @@ function setQueueFilter(filter) {
   loadQueue();
 }
 
-async function startDelivery(id,origin,destination,recipient) {
+async function startDelivery(id, origin, destination, recipient, recipientEmail='') {
   if (!preflightReady) { showToast('Preflight not passing — check Preflight panel','error'); return; }
   if (!weatherOk)      { showToast('Wind too high — delivery blocked','error'); return; }
 
@@ -462,16 +505,15 @@ async function startDelivery(id,origin,destination,recipient) {
     document.getElementById('progress-block').style.display='block';
     document.getElementById('inflight-stats').style.display='block';
     document.getElementById('delivered-card').style.display='none';
-    startFlight(id,recipient);
+    startFlight(id, recipient, recipientEmail, origin, destination);
   },1800);
 }
 
-function startFlight(ticketId, recipient) {
+function startFlight(ticketId, recipient, recipientEmail, origin, destination) {
   flightPct=0;
   const steps=300, interval=Math.max((totalFlightMin*60*1000)/steps,80);
 
   flightTimer=setInterval(async()=>{
-    // Real GPS progress if available
     if (lastTelemetry.lat&&lastTelemetry.lat!==0&&originLatLng&&destLatLng) {
       const total=haversine(originLatLng.lat(),originLatLng.lng(),destLatLng.lat(),destLatLng.lng());
       const rem=haversine(lastTelemetry.lat,lastTelemetry.lon,destLatLng.lat(),destLatLng.lng());
@@ -484,7 +526,6 @@ function startFlight(ticketId, recipient) {
     document.getElementById('pb-bar').style.width=pct+'%';
     set('pb-pct',pct+'%');
 
-    // Animate along straight aerial line when no real GPS
     if ((!lastTelemetry.lat||lastTelemetry.lat===0)&&originLatLng&&destLatLng) {
       const t=flightPct/100;
       droneMarker.setPosition({
@@ -510,16 +551,33 @@ function startFlight(ticketId, recipient) {
         const d=deliveries.find(d=>String(d.id)===String(ticketId));
         if(d){d.status='delivered';d.completed_at=completedAt;}
       }
+
       const elapsed=new Date()-flightStartTime;
       const em=Math.floor(elapsed/60000), es=Math.floor((elapsed%60000)/1000);
+      const elapsedStr = `Delivered in ${em}m ${es}s`;
+
       activeTicketId=null;
       document.getElementById('progress-block').style.display='none';
       document.getElementById('inflight-stats').style.display='none';
       document.getElementById('delivered-card').style.display='block';
-      set('delivered-sub',recipient);
-      set('delivered-time','Delivered in '+em+'m '+es+'s');
+      set('delivered-sub', recipient);
+      set('delivered-time', elapsedStr);
       document.getElementById('btn-create-ticket').disabled=false;
-      loadQueue(); showToast('Delivery complete — '+recipient,'ok');
+      loadQueue();
+      showToast('Delivery complete — '+recipient,'ok');
+
+      // Send delivery completion email
+      if (recipientEmail) {
+        await sendNotification(
+          recipientEmail,
+          recipient.split(' ')[0],
+          ticketId,
+          'delivered',
+          origin,
+          destination,
+          elapsedStr
+        );
+      }
     }
   },interval);
 }
@@ -554,7 +612,7 @@ function updateSidebar(d) {
   set('sb-mode', d.mode||'—');
   set('sb-gps',  d.satellites!=null?d.satellites+' sats':'—');
   set('sb-port', d.port||'—');
-  if(d.battery_pct>0)    set('sb-batt',d.battery_pct+'%');
+  if(d.battery_pct>0)     set('sb-batt',d.battery_pct+'%');
   if(d.battery_voltage>0) set('sb-volt',d.battery_voltage.toFixed(1)+'V');
   const badge=document.getElementById('arm-badge');
   if(badge){badge.textContent=d.armed?'Armed':'Disarmed';badge.classList.toggle('armed',!!d.armed);}
@@ -564,7 +622,6 @@ function updateTelemetryPanel(d) {
   const altFt  = d.altitude?Math.round(d.altitude*3.281):null;
   const spdMph = d.groundspeed?Math.round(d.groundspeed*2.237):null;
 
-  // Altitude with FAA limit coloring
   const altEl=document.getElementById('tl-alt');
   if(altEl){
     altEl.innerHTML=altFt!=null?altFt+' <small>ft</small>':'— <small>ft</small>';
@@ -572,7 +629,6 @@ function updateTelemetryPanel(d) {
     if(card){card.classList.toggle('warn-card',altFt!=null&&altFt>100); card.classList.toggle('err-card',altFt!=null&&altFt>120);}
   }
 
-  // Speed vs target
   const spdEl=document.getElementById('tl-spd');
   if(spdEl){
     spdEl.innerHTML=spdMph!=null?spdMph+' <small>mph</small>':'— <small>mph</small>';
@@ -583,7 +639,6 @@ function updateTelemetryPanel(d) {
     }
   }
 
-  // Battery voltage with threshold coloring
   const battEl=document.getElementById('tl-batt');
   if(battEl){
     const v=d.battery_voltage;
@@ -592,7 +647,6 @@ function updateTelemetryPanel(d) {
     if(card){card.classList.toggle('warn-card',v>0&&v<21.0); card.classList.toggle('err-card',v>0&&v<19.8);}
   }
 
-  // GPS with min satellite coloring
   const satEl=document.getElementById('tl-sat');
   if(satEl){
     satEl.textContent=d.satellites??'—';
@@ -630,7 +684,7 @@ if(settingsBtn){
   });
 }
 
-// ── CAMERA — auto connects to current server ──────────────────────
+// ── CAMERA ────────────────────────────────────────────────────────
 function connectCamera() {
   const url='/video?t='+Date.now();
   [document.getElementById('cam-img'),document.getElementById('cam-feed-tl')].forEach(img=>{
@@ -745,7 +799,6 @@ function renderPreflight(data) {
       btn.addEventListener('click',()=>testDevice(btn.dataset.devid));
     });
   }
-  // Static drone specs
   set('pf-spec-auw', DRONE_AUW_KG+' kg');
   set('pf-spec-end', USABLE_ENDURANCE+' min ('+BATT_MIN_PCT+'% reserve)');
   set('pf-spec-cap', MAX_PAYLOAD_GRAMS+'g / '+MAX_LETTERS+' letters max');
